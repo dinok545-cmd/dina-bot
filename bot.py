@@ -55,14 +55,29 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SLOTS_FILE = DATA_DIR / "slots.json"
 USERS_FILE = DATA_DIR / "users.json"
 
-# При первом запуске после перехода на DATA_DIR переносим старые файлы из репозитория.
-for _name, _target in (("slots.json", SLOTS_FILE), ("users.json", USERS_FILE)):
-    _legacy = BASE_DIR / _name
-    if not _target.exists() and _legacy.exists() and _legacy != _target:
-        try:
-            shutil.copy2(_legacy, _target)
-        except Exception:
-            logging.exception("Не удалось перенести %s в DATA_DIR", _name)
+# Пользователей можно перенести из старого файла.
+# Расписание НЕ копируем из репозитория: раньше там лежали старые 45-минутные интервалы,
+# из-за чего они возвращались после нового деплоя.
+_legacy_users = BASE_DIR / "users.json"
+if not USERS_FILE.exists() and _legacy_users.exists() and _legacy_users != USERS_FILE:
+    try:
+        shutil.copy2(_legacy_users, USERS_FILE)
+    except Exception:
+        logging.exception("Не удалось перенести users.json в DATA_DIR")
+
+# Актуальное расписание на момент этой версии.
+DEFAULT_SLOTS = [
+    "Понедельник 16:00–17:00",
+    "Среда 17:00–18:00",
+    "Пятница 17:00–18:00",
+]
+
+# Старое расписание, которое ошибочно возвращалось после деплоя.
+LEGACY_SLOTS_SIGNATURES = {
+    "пн18:00-18:45",
+    "ср17:00-17:45",
+    "пт16:00-16:45",
+}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -121,11 +136,32 @@ dp.callback_query.middleware(UserTrackerMiddleware())
 
 
 # ============ ХРАНЕНИЕ ОКОШЕК (простой JSON-файл) ============
+def _slot_signature(value: str) -> str:
+    value = (value or "").lower().strip()
+    value = value.replace("–", "-").replace("—", "-")
+    value = re.sub(r"\\s+", "", value)
+    return value
+
+
 def load_slots() -> list[str]:
     if not SLOTS_FILE.exists():
+        save_slots(DEFAULT_SLOTS.copy())
+        return DEFAULT_SLOTS.copy()
+
+    try:
+        with open(SLOTS_FILE, "r", encoding="utf-8") as f:
+            slots = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logging.exception("Не удалось прочитать slots.json")
         return []
-    with open(SLOTS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+
+    # Одноразовая автоматическая миграция именно старого ошибочного набора.
+    signatures = {_slot_signature(s) for s in slots}
+    if signatures == LEGACY_SLOTS_SIGNATURES:
+        slots = DEFAULT_SLOTS.copy()
+        save_slots(slots)
+        logging.info("Старое 45-минутное расписание автоматически заменено на актуальное.")
+    return slots
 
 
 def save_slots(slots: list[str]) -> None:
@@ -203,16 +239,33 @@ def is_contact_question(question: str) -> bool:
 
 
 def clean_ai_answer(answer: str) -> str:
-    # В диалоге не нужно заново здороваться перед каждым сообщением.
+    """
+    Финальная очистка ответа ИИ перед отправкой в Telegram.
+    Markdown пользователю не показываем вообще: никаких звёздочек и решёток.
+    """
     answer = (answer or "").strip()
+
+    # Убираем повторное приветствие в начале ответа.
     answer = re.sub(
-        r"^(?:здравствуйте|привет|добрый день|добрый вечер|доброе утро)[!,.?:;\s—–-]*",
+        r"^(?:здравствуйте|привет|добрый день|добрый вечер|доброе утро)[!,.?:;\\s—–-]*",
         "",
         answer,
         count=1,
         flags=re.IGNORECASE,
     ).lstrip()
-    return answer
+
+    # Полностью убираем Markdown-символы, которые Telegram показывал как обычный текст.
+    answer = answer.replace("*", "")
+    answer = answer.replace("#", "")
+
+    # Заодно убираем обратные кавычки Markdown, чтобы не появлялся `такой` текст.
+    answer = answer.replace("`", "")
+
+    # Убираем лишние пробелы перед переносами и слишком много пустых строк.
+    answer = re.sub(r"[ \\t]+\\n", "\\n", answer)
+    answer = re.sub(r"\\n{3,}", "\\n\\n", answer)
+
+    return answer.strip()
 
 
 async def ask_kie(question: str, user_id: int | None = None) -> str:
@@ -319,6 +372,8 @@ async def ask_kie(question: str, user_id: int | None = None) -> str:
             "• Если пользователь задаёт короткий уточняющий вопрос, учитывай предыдущие реплики диалога.\n"
             "• Если пользователь пишет по-русски, отвечай по-русски.\n"
             "• Не повторяй приветствие перед каждым ответом.\n"
+            "• Никогда не используй Markdown-разметку в ответах: не ставь звёздочки, решётки и обратные кавычки. "
+            "Для структуры используй обычный текст, абзацы, нумерацию и эмодзи.\n"
             "• Не вставляй ссылку на Дину автоматически в каждый ответ. Она нужна только тогда, когда "
             "пользователь просит контакт или спрашивает о неподтверждённом факте именно о занятиях/правилах Дины.\n"
             "• Если вопрос можно точно закрыть данными из базы, сразу дай конкретный ответ без фразы "
