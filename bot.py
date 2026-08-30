@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,9 @@ from aiogram.types import (
     FSInputFile,
     InputMediaPhoto,
     TelegramObject,
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -39,11 +43,26 @@ CHANNEL_USERNAME = "@akhmedovadina"
 CHANNEL_LINK = "https://t.me/akhmedovadina"
 MINECRAFT_MATERIALS_LINK = "https://dinok545-cmd.github.io/havehasmemory_minecraft/"
 SINCE_FOR_GAME_LINK = "https://dinok545-cmd.github.io/games2/"
+KOSMOMATIKA_LINK = "https://dinok545-cmd.github.io/kosmomatika/"
 
 BASE_DIR = Path(__file__).parent
 IMAGES_DIR = BASE_DIR / "images"
-SLOTS_FILE = BASE_DIR / "slots.json"
-USERS_FILE = BASE_DIR / "users.json"
+
+# Bothost создаёт DATA_DIR=/app/data. Там расписание и статистика переживают деплои.
+DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+SLOTS_FILE = DATA_DIR / "slots.json"
+USERS_FILE = DATA_DIR / "users.json"
+
+# При первом запуске после перехода на DATA_DIR переносим старые файлы из репозитория.
+for _name, _target in (("slots.json", SLOTS_FILE), ("users.json", USERS_FILE)):
+    _legacy = BASE_DIR / _name
+    if not _target.exists() and _legacy.exists() and _legacy != _target:
+        try:
+            shutil.copy2(_legacy, _target)
+        except Exception:
+            logging.exception("Не удалось перенести %s в DATA_DIR", _name)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -112,6 +131,37 @@ def load_slots() -> list[str]:
 def save_slots(slots: list[str]) -> None:
     with open(SLOTS_FILE, "w", encoding="utf-8") as f:
         json.dump(slots, f, ensure_ascii=False, indent=2)
+
+
+def normalize_slot_text(value: str) -> str | None:
+    """
+    Приводит расписание к единому виду: «Среда 17:00–18:00».
+    Возвращает None, если формат не распознан или длительность не 60 минут.
+    """
+    raw = " ".join((value or "").strip().split())
+    match = re.match(
+        r"^(?P<day>.+?)\s+(?P<h1>\d{1,2}):(?P<m1>\d{2})\s*[-–—]\s*"
+        r"(?P<h2>\d{1,2}):(?P<m2>\d{2})$",
+        raw,
+    )
+    if not match:
+        return None
+
+    h1, m1 = int(match["h1"]), int(match["m1"])
+    h2, m2 = int(match["h2"]), int(match["m2"])
+    if not (0 <= h1 <= 23 and 0 <= h2 <= 23 and 0 <= m1 <= 59 and 0 <= m2 <= 59):
+        return None
+
+    start = h1 * 60 + m1
+    end = h2 * 60 + m2
+    if end - start != 60:
+        return None
+
+    day = match["day"].strip()
+    if day:
+        day = day[0].upper() + day[1:]
+
+    return f"{day} {h1:02d}:{m1:02d}–{h2:02d}:{m2:02d}"
 
 
 def format_slots(slots: list[str]) -> str:
@@ -239,9 +289,10 @@ async def ask_kie(question: str, user_id: int | None = None) -> str:
 
             f"14. Telegram-канал Дины: {CHANNEL_LINK}.\n"
 
-            "15. Бесплатные материалы. В боте есть раздел «🎁 Полезные материалы». После проверки "
-            "подписки на канал пользователю доступны два материала: "
-            "«Minecraft — рабочие листы и игры» и «Since/For Memory Challenge».\n"
+            "15. Бесплатные материалы и тренажёры. В боте есть раздел «🎮 Тренажёры». После проверки "
+            "подписки на канал пользователю доступны три материала: "
+            "«Космоматика — тренажёр по математике для 1–4 классов», "
+            "«Minecraft English — рабочие листы и игры» и «Since/For Memory Challenge».\n"
 
             "16. Сертификаты. Подтверждённой информации о выдаче сертификатов нет. Если спрашивают "
             "о сертификате, скажи, что точной информации нет, и предложи уточнить у Дины напрямую.\n\n"
@@ -341,23 +392,35 @@ class SlotsAdmin(StatesGroup):
 
 # ============ КЛАВИАТУРЫ ============
 def main_menu_kb() -> InlineKeyboardMarkup:
+    """Компактное главное меню."""
     kb = InlineKeyboardBuilder()
-    kb.button(text="🌟 Отзывы", callback_data="reviews")
-    kb.button(text="📚 Свободные места на занятия", callback_data="slots")
-    kb.button(text="✏️ Записаться на занятие", callback_data="book")
-    kb.button(text="🎓 Записаться на пробное занятие", callback_data="trial_book")
-    kb.button(text="🤖 Спросить ассистента", callback_data="ask_ai")
-    kb.button(text="🎁 Полезные материалы", callback_data="materials")
+    kb.button(text="🎓 Бесплатный пробный урок", callback_data="trial_book")
+    kb.button(text="📚 Занятия", callback_data="lessons_menu")
+    kb.button(text="🎮 Тренажёры", callback_data="materials")
+    kb.button(text="⭐ Отзывы", callback_data="reviews")
+    kb.button(text="🤖 Ассистент", callback_data="ask_ai")
     kb.button(text="💬 Написать Дине", url=TEACHER_LINK)
-    kb.adjust(1)
+    kb.adjust(1, 2, 2, 1)
+    return kb.as_markup()
+
+
+def lessons_menu_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📚 Свободные места", callback_data="slots")
+    kb.button(text="✏️ Записаться", callback_data="book")
+    kb.button(text="💰 Форматы и цены", callback_data="prices")
+    kb.button(text="📋 Правила занятий", callback_data="rules")
+    kb.button(text="⬅️ Главное меню", callback_data="main_back")
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
 def slots_cta_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✏️ Записаться на занятие", callback_data="book")
+    kb.button(text="✏️ Записаться", callback_data="book")
     kb.button(text="💬 Написать Дине", url=TEACHER_LINK)
-    kb.adjust(1)
+    kb.button(text="⬅️ К занятиям", callback_data="lessons_menu")
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -367,17 +430,16 @@ def booking_kb(slots: list[str]) -> InlineKeyboardMarkup:
         kb.button(text=f"✅ {slot}", callback_data=f"bookslot_{i}")
     kb.button(text="📝 Предложить другое время", callback_data="book_other")
     kb.button(text="💬 Написать Дине", url=TEACHER_LINK)
-    kb.button(text="⬅️ Назад в меню", callback_data="book_back")
+    kb.button(text="⬅️ К занятиям", callback_data="lessons_menu")
     kb.adjust(1)
     return kb.as_markup()
-
 
 
 def materials_gate_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📣 Подписаться", url=CHANNEL_LINK)
     kb.button(text="✅ Проверить подписку", callback_data="check_subscription")
-    kb.button(text="⬅️ Назад", callback_data="materials_back")
+    kb.button(text="⬅️ Главное меню", callback_data="main_back")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -385,15 +447,31 @@ def materials_gate_kb() -> InlineKeyboardMarkup:
 def materials_list_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(
-        text="🎮 Minecraft — рабочие листы и игры",
+        text="🚀 Космоматика — тренажёр по математике 1–4 класс",
+        url=KOSMOMATIKA_LINK,
+    )
+    kb.button(
+        text="⛏ Minecraft English — рабочие листы и игры",
         url=MINECRAFT_MATERIALS_LINK,
     )
     kb.button(
         text="⏳ Since/For Memory Challenge",
         url=SINCE_FOR_GAME_LINK,
     )
-    kb.button(text="⬅️ Назад", callback_data="materials_back")
+    kb.button(text="⬅️ Главное меню", callback_data="main_back")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def assistant_quick_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖥 Как проходят занятия?", callback_data="faq_how")
+    kb.button(text="💰 Сколько стоит?", callback_data="faq_price")
+    kb.button(text="🎓 Пробный урок", callback_data="faq_trial")
+    kb.button(text="🔄 Перенос и отмена", callback_data="faq_cancel")
+    kb.button(text="✍️ Задать свой вопрос", callback_data="ask_custom")
+    kb.button(text="⬅️ Главное меню", callback_data="main_back")
+    kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -439,9 +517,63 @@ async def cmd_start(message: Message, state: FSMContext):
         "Дина — крутой специалист по английскому языку и предметам начальной школы. "
         "Помогает школьникам не бояться английского, разбираться "
         "со школьной программой и уверенно двигаться вперёд 🚀\n\n"
-        "Выбери, что тебя интересует 👇",
+        "Выбери нужный раздел 👇",
         reply_markup=main_menu_kb(),
     )
+
+
+# ============ Навигация по меню ============
+@dp.callback_query(F.data == "main_back")
+async def main_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("Главное меню 👇", reply_markup=main_menu_kb())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "lessons_menu")
+async def lessons_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer(
+        "📚 Занятия\n\nВыбери нужный раздел 👇",
+        reply_markup=lessons_menu_kb(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "prices")
+async def show_prices(callback: CallbackQuery):
+    await callback.message.answer(
+        "💰 <b>Форматы и стоимость</b>\n\n"
+        "👥 Группа до 4 человек — <b>1000 ₽ / 60 минут</b>\n"
+        "👫 В паре — <b>1300 ₽ / 60 минут</b>\n"
+        "👤 Индивидуально — <b>1500 ₽ / 60 минут</b>\n\n"
+        "🎓 Подготовка к ОГЭ/ЕГЭ по английскому индивидуально — "
+        "<b>2000 ₽ / 60 минут</b>\n\n"
+        "Пробное занятие — <b>бесплатно, 30 минут</b>.",
+        parse_mode="HTML",
+        reply_markup=lessons_menu_kb(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "rules")
+async def show_rules(callback: CallbackQuery):
+    await callback.message.answer(
+        "📋 <b>Правила зависят от формата занятий:</b>\n\n"
+        "📚 <b>Групповое занятие</b>\n"
+        "Дина отправляет запись урока и все материалы. При пропуске одного ученика "
+        "занятие для остальных участников сокращается на 20 минут.\n\n"
+        "🔄 <b>Отмена или перенос</b>\n"
+        "О переносе или отмене необходимо предупредить заранее. Если отмена или перенос "
+        "происходят менее чем за 4 часа до занятия, урок подлежит полной оплате.\n\n"
+        "🤒 <b>Болезнь</b>\n"
+        "Исключение — болезнь ученика при наличии справки от врача. Без справки оплата "
+        "за пропущенное занятие не возвращается.\n\n"
+        "📝 Перед началом регулярных занятий заключается договор.",
+        parse_mode="HTML",
+        reply_markup=lessons_menu_kb(),
+    )
+    await callback.answer()
 
 
 # ============ Отзывы ============
@@ -466,12 +598,12 @@ async def show_reviews(callback: CallbackQuery):
 async def materials_start(callback: CallbackQuery):
     if await is_channel_subscriber(callback.from_user.id):
         await callback.message.answer(
-            "🎉 Подписка подтверждена!\n\nВыбирай материал 👇",
+            "🎉 Подписка подтверждена!\n\nВыбирай тренажёр или материал 👇",
             reply_markup=materials_list_kb(),
         )
     else:
         await callback.message.answer(
-            "🎁 Материалы доступны подписчикам канала Дины 💛\n\n"
+            "🎮 Тренажёры доступны подписчикам канала Дины 💛\n\n"
             "Подпишись на канал и нажми «Проверить подписку».",
             reply_markup=materials_gate_kb(),
         )
@@ -482,7 +614,7 @@ async def materials_start(callback: CallbackQuery):
 async def check_subscription(callback: CallbackQuery):
     if await is_channel_subscriber(callback.from_user.id):
         await callback.message.edit_text(
-            "🎉 Подписка подтверждена!\n\nВыбирай материал 👇",
+            "🎉 Подписка подтверждена!\n\nВыбирай тренажёр или материал 👇",
             reply_markup=materials_list_kb(),
         )
         await callback.answer("Подписка подтверждена ✅")
@@ -493,13 +625,6 @@ async def check_subscription(callback: CallbackQuery):
         )
 
 
-@dp.callback_query(F.data == "materials_back")
-async def materials_back(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "Выбери, что тебя интересует 👇",
-        reply_markup=main_menu_kb(),
-    )
-    await callback.answer()
 
 
 # ============ Свободные места на занятия ============
@@ -585,7 +710,7 @@ async def book_other_time(callback: CallbackQuery, state: FSMContext):
 async def book_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer(
-        "Выбери, что тебя интересует 👇",
+        "Выбери нужный раздел 👇",
         reply_markup=main_menu_kb(),
     )
     await callback.answer()
@@ -659,12 +784,92 @@ async def trial_book_receive(message: Message, state: FSMContext):
 # ============ Спросить ассистента (ИИ) ============
 @dp.callback_query(F.data == "ask_ai")
 async def ask_ai_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     await callback.message.answer(
-        "Напиши свой вопрос, и ассистент постарается помочь 🤖\n\n"
-        "Можно задавать несколько вопросов подряд. Чтобы выйти из режима ассистента — отправь /start."
+        "🤖 Ассистент Дины\n\n"
+        "Можно выбрать частый вопрос кнопкой или написать свой 👇",
+        reply_markup=assistant_quick_kb(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "ask_custom")
+async def ask_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "Напиши свой вопрос одним сообщением 🤖\n\n"
+        "Можно задавать несколько вопросов подряд. Чтобы выйти — отправь /start."
     )
     await state.set_state(AskAI.waiting_question)
     await callback.answer()
+
+
+async def answer_static_faq(callback: CallbackQuery, text: str):
+    await callback.message.answer(text, reply_markup=assistant_quick_kb())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "faq_how")
+async def faq_how(callback: CallbackQuery):
+    await answer_static_faq(
+        callback,
+        "Занятия проходят онлайн в Zoom с использованием интерактивной доски. "
+        "Дина демонстрирует экран, а ученик сам взаимодействует с заданиями и "
+        "управляет интерактивными материалами. Обычное занятие длится 60 минут.",
+    )
+
+
+@dp.callback_query(F.data == "faq_price")
+async def faq_price(callback: CallbackQuery):
+    await answer_static_faq(
+        callback,
+        "Группа до 4 человек — 1000 ₽ / 60 минут.\n"
+        "В паре — 1300 ₽ / 60 минут.\n"
+        "Индивидуально — 1500 ₽ / 60 минут.\n"
+        "ОГЭ/ЕГЭ по английскому индивидуально — 2000 ₽ / 60 минут.",
+    )
+
+
+@dp.callback_query(F.data == "faq_trial")
+async def faq_trial(callback: CallbackQuery):
+    await answer_static_faq(
+        callback,
+        "Пробное занятие бесплатное и длится 30 минут. "
+        "Записаться можно через кнопку «🎓 Бесплатный пробный урок» в главном меню.",
+    )
+
+
+@dp.callback_query(F.data == "faq_cancel")
+async def faq_cancel(callback: CallbackQuery):
+    await answer_static_faq(
+        callback,
+        "Если отмена или перенос происходят менее чем за 4 часа до занятия, "
+        "урок подлежит полной оплате. Исключение — болезнь ученика при наличии "
+        "справки от врача. Без справки оплата не возвращается.",
+    )
+
+
+@dp.message(Command("ask"))
+async def ask_command(message: Message, state: FSMContext):
+    await state.set_state(AskAI.waiting_question)
+    await message.answer(
+        "Напиши свой вопрос одним сообщением 🤖\n"
+        "Можно задавать несколько вопросов подряд. Чтобы выйти — отправь /start."
+    )
+
+
+@dp.message(Command("trainers"))
+async def trainers_command(message: Message):
+    if await is_channel_subscriber(message.from_user.id):
+        await message.answer(
+            "🎮 Выбирай тренажёр или материал 👇",
+            reply_markup=materials_list_kb(),
+        )
+    else:
+        await message.answer(
+            "🎮 Тренажёры доступны подписчикам канала Дины 💛\n\n"
+            "Подпишись на канал и нажми «Проверить подписку».",
+            reply_markup=materials_gate_kb(),
+        )
 
 
 @dp.message(AskAI.waiting_question)
@@ -733,8 +938,19 @@ async def admin_add_slot_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(SlotsAdmin.waiting_new_slot)
 async def admin_add_slot_receive(message: Message, state: FSMContext):
+    normalized = normalize_slot_text(message.text)
+    if normalized is None:
+        await message.answer(
+            "Не получилось добавить место ❌\n\n"
+            "Занятие должно длиться ровно 60 минут и быть записано, например:\n"
+            "<code>Среда 17:00–18:00</code>\n\n"
+            "Попробуй ещё раз.",
+            parse_mode="HTML",
+        )
+        return
+
     slots = load_slots()
-    slots.append(message.text.strip())
+    slots.append(normalized)
     save_slots(slots)
     await message.answer(f"Добавлено ✅\n\n{format_slots(slots)}")
     await state.clear()
@@ -785,7 +1001,31 @@ async def ai_fallback(message: Message):
 
 
 # ============ ЗАПУСК ============
+async def setup_commands():
+    # Это и есть выпадающее меню команд Telegram, о котором говорил тестировщик.
+    common = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="ask", description="Спросить ассистента"),
+        BotCommand(command="trainers", description="Тренажёры и материалы"),
+    ]
+    await bot.set_my_commands(common, scope=BotCommandScopeDefault())
+
+    # У Дины дополнительно отображаются админ-команды.
+    admin_commands = common + [
+        BotCommand(command="okna", description="Управление свободными местами"),
+        BotCommand(command="users", description="Статистика пользователей"),
+    ]
+    try:
+        await bot.set_my_commands(
+            admin_commands,
+            scope=BotCommandScopeChat(chat_id=ADMIN_ID),
+        )
+    except Exception:
+        logging.exception("Не удалось установить админ-команды")
+
+
 async def main():
+    await setup_commands()
     await dp.start_polling(bot)
 
 
