@@ -2,9 +2,10 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,27 +17,76 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
     InputMediaPhoto,
+    TelegramObject,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "328761045"))  # кому приходят уведомления о записи
+ADMIN_ID = int(os.getenv("ADMIN_ID", "864712374"))  # кому приходят уведомления о записи
 TEACHER_LINK = os.getenv("TEACHER_LINK", "https://t.me/english_dina_bot")
 
-# ID, которым доступны настоящие ответы ИИ (защита от лишних трат бесплатного лимита)
-ALLOWED_AI_IDS = {328761045}
+# ID проверяющего — ему показываем заглушку, чтобы не тратить лимит на его тесты.
+# Всем остальным (включая Дину и настоящих учеников) — реальные ответы ИИ.
+STUB_AI_IDS = {328761045}
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 BASE_DIR = Path(__file__).parent
 IMAGES_DIR = BASE_DIR / "images"
 SLOTS_FILE = BASE_DIR / "slots.json"
+USERS_FILE = BASE_DIR / "users.json"
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+
+# ============ УЧЁТ ПОЛЬЗОВАТЕЛЕЙ ============
+def load_users() -> dict:
+    if not USERS_FILE.exists():
+        return {}
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_users(users: dict) -> None:
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+
+def track_user(user) -> None:
+    if user is None:
+        return
+    users = load_users()
+    key = str(user.id)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if key not in users:
+        users[key] = {
+            "name": user.full_name,
+            "username": user.username,
+            "first_seen": now,
+            "last_seen": now,
+            "messages": 1,
+        }
+    else:
+        users[key]["last_seen"] = now
+        users[key]["name"] = user.full_name
+        users[key]["username"] = user.username
+        users[key]["messages"] = users[key].get("messages", 0) + 1
+    save_users(users)
+
+
+class UserTrackerMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = getattr(event, "from_user", None)
+        track_user(user)
+        return await handler(event, data)
+
+
+dp.message.middleware(UserTrackerMiddleware())
+dp.callback_query.middleware(UserTrackerMiddleware())
 
 
 # ============ ХРАНЕНИЕ ОКОШЕК (простой JSON-файл) ============
@@ -212,13 +262,37 @@ async def ask_ai_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(AskAI.waiting_question)
 async def ask_ai_receive(message: Message, state: FSMContext):
-    if message.from_user.id in ALLOWED_AI_IDS:
+    if message.from_user.id in STUB_AI_IDS:
+        await message.answer(STUB_ANSWER)
+    else:
         await message.chat.do("typing")
         answer = await ask_gemini(message.text)
         await message.answer(answer)
-    else:
-        await message.answer(STUB_ANSWER)
     await state.clear()
+
+
+# ============ Админ: статистика пользователей /users ============
+@dp.message(Command("users"))
+async def show_users(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    users = load_users()
+    if not users:
+        await message.answer("Пока никто не писал боту.")
+        return
+    sorted_users = sorted(
+        users.items(), key=lambda kv: kv[1]["last_seen"], reverse=True
+    )
+    lines = [f"👥 Всего пользователей: {len(users)}\n"]
+    for uid, info in sorted_users[:30]:
+        uname = f"@{info['username']}" if info.get("username") else "без username"
+        lines.append(
+            f"• {info['name']} ({uname}, id:{uid})\n"
+            f"   последний раз: {info['last_seen']}, сообщений: {info.get('messages', 1)}"
+        )
+    text = "\n".join(lines)
+    for i in range(0, len(text), 3500):
+        await message.answer(text[i : i + 3500])
 
 
 # ============ Админ: управление окошками /okna ============
