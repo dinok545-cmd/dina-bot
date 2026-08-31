@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import shutil
 from datetime import datetime
@@ -34,7 +35,6 @@ TEACHER_LINK = os.getenv("TEACHER_LINK", "https://t.me/academia_onlinee")
 
 # ID проверяющего — ему показываем заглушку, чтобы не тратить лимит на его тесты.
 # Всем остальным (включая Дину и настоящих учеников) — реальные ответы ИИ.
-STUB_AI_IDS = {328761045}
 
 KIE_API_KEY = os.getenv("KIE_API_KEY", "")
 
@@ -88,6 +88,92 @@ dp = Dispatcher(storage=MemoryStorage())
 AI_HISTORY: dict[int, list[dict[str, str]]] = {}
 
 
+
+
+
+# Квиз по неправильным глаголам английского языка.
+IRREGULAR_VERB_QUIZ = [
+    {"q": "go — went — ...?", "options": ["gone", "goed", "going"], "answer": 0, "explain": "go — went — gone"},
+    {"q": "see — saw — ...?", "options": ["seen", "seed", "saw"], "answer": 0, "explain": "see — saw — seen"},
+    {"q": "take — took — ...?", "options": ["taken", "taked", "took"], "answer": 0, "explain": "take — took — taken"},
+    {"q": "write — wrote — ...?", "options": ["written", "writed", "wrote"], "answer": 0, "explain": "write — wrote — written"},
+    {"q": "eat — ate — ...?", "options": ["eaten", "ated", "eat"], "answer": 0, "explain": "eat — ate — eaten"},
+    {"q": "speak — spoke — ...?", "options": ["spoken", "speaked", "spoke"], "answer": 0, "explain": "speak — spoke — spoken"},
+    {"q": "give — gave — ...?", "options": ["given", "gived", "gave"], "answer": 0, "explain": "give — gave — given"},
+    {"q": "know — knew — ...?", "options": ["known", "knowed", "knew"], "answer": 0, "explain": "know — knew — known"},
+    {"q": "begin — began — ...?", "options": ["begun", "begined", "began"], "answer": 0, "explain": "begin — began — begun"},
+    {"q": "drink — drank — ...?", "options": ["drunk", "drinked", "drank"], "answer": 0, "explain": "drink — drank — drunk"},
+    {"q": "buy — ... — bought", "options": ["bought", "buyed", "brought"], "answer": 0, "explain": "buy — bought — bought"},
+    {"q": "think — ... — thought", "options": ["thought", "thinked", "taught"], "answer": 0, "explain": "think — thought — thought"},
+    {"q": "find — ... — found", "options": ["found", "finded", "founded"], "answer": 0, "explain": "find — found — found"},
+    {"q": "make — ... — made", "options": ["made", "maked", "make"], "answer": 0, "explain": "make — made — made"},
+    {"q": "come — came — ...?", "options": ["come", "comed", "came"], "answer": 0, "explain": "come — came — come"},
+    {"q": "run — ran — ...?", "options": ["run", "runned", "ran"], "answer": 0, "explain": "run — ran — run"},
+]
+
+# Мини-квиз по русскому языку для 1–4 классов.
+RU_QUIZ = [
+    {
+        "q": "Какое слово написано правильно?",
+        "options": ["машына", "машина", "мошина"],
+        "answer": 1,
+        "explain": "В сочетании ШИ пишем букву И: машина.",
+    },
+    {
+        "q": "Какое слово написано правильно?",
+        "options": ["чяща", "чаща", "чашаа"],
+        "answer": 1,
+        "explain": "ЧА–ЩА пишем с буквой А: чаща.",
+    },
+    {
+        "q": "Какое слово написано правильно?",
+        "options": ["чюдо", "чудо", "чюддо"],
+        "answer": 1,
+        "explain": "ЧУ–ЩУ пишем с буквой У: чудо.",
+    },
+    {
+        "q": "В каком слове нужен мягкий знак?",
+        "options": ["кон", "конь", "кони"],
+        "answer": 1,
+        "explain": "Слово «конь» оканчивается на мягкий согласный, поэтому пишем Ь.",
+    },
+    {
+        "q": "Выбери проверочное слово к слову «дуб».",
+        "options": ["дубы", "дубок", "дерево"],
+        "answer": 0,
+        "explain": "В слове «дубы» звук Б слышится ясно — это проверочное слово.",
+    },
+    {
+        "q": "Где нужен разделительный мягкий знак?",
+        "options": ["семя", "семья", "сима"],
+        "answer": 1,
+        "explain": "В слове «семья» перед Я после согласной пишется разделительный Ь.",
+    },
+    {
+        "q": "Как правильно начать предложение?",
+        "options": ["с большой буквы", "с маленькой буквы", "с цифры"],
+        "answer": 0,
+        "explain": "Предложение начинаем с большой буквы.",
+    },
+    {
+        "q": "Какой знак чаще всего ставят в конце обычного сообщения-предложения?",
+        "options": ["точку", "двоеточие", "скобку"],
+        "answer": 0,
+        "explain": "В конце повествовательного предложения обычно ставят точку.",
+    },
+    {
+        "q": "Какое слово — имя существительное?",
+        "options": ["бежать", "красивый", "книга"],
+        "answer": 2,
+        "explain": "«Книга» отвечает на вопрос «что?» — это имя существительное.",
+    },
+    {
+        "q": "Какое слово — глагол?",
+        "options": ["читать", "книга", "весёлый"],
+        "answer": 0,
+        "explain": "«Читать» обозначает действие и отвечает на вопрос «что делать?»",
+    },
+]
 
 # ============ УЧЁТ ПОЛЬЗОВАТЕЛЕЙ ============
 def load_users() -> dict:
@@ -435,13 +521,6 @@ async def ask_kie(question: str, user_id: int | None = None) -> str:
         return "Не получилось получить ответ от ИИ, попробуй чуть позже 🙏"
 
 
-STUB_ANSWER = (
-    "🤖 Это демо-режим ассистента (чтобы не тратить бесплатный лимит запросов).\n\n"
-    "Пример того, как отвечает ИИ:\n"
-    "«Привет! Я помогу разобраться с английским — грамматикой, словами, произношением "
-    "или просто отвечу на вопрос по школьной программе. Пиши, что интересует!»\n\n"
-    "Полный доступ к живым ответам ИИ есть у автора проекта."
-)
 
 
 # ============ СОСТОЯНИЯ (FSM) ============
@@ -535,14 +614,67 @@ def materials_list_kb() -> InlineKeyboardMarkup:
 
 
 def assistant_quick_kb() -> InlineKeyboardMarkup:
+    """Мини-хаб ассистента: вопрос + полезные игровые режимы."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💬 Задать вопрос", callback_data="ask_custom")
+    kb.button(text="🇬🇧 Mini English", callback_data="mini_english")
+    kb.button(text="🇷🇺 Квиз по русскому", callback_data="ru_quiz")
+    kb.button(text="🔤 Неправильные глаголы", callback_data="irregular_quiz")
+    kb.button(text="🎲 Сюрприз-задание", callback_data="assistant_surprise")
+    kb.button(text="❓ Частые вопросы", callback_data="assistant_faq")
+    kb.button(text="⬅️ Главное меню", callback_data="main_back")
+    kb.adjust(1, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def assistant_faq_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🖥 Как проходят занятия?", callback_data="faq_how")
     kb.button(text="💰 Сколько стоит?", callback_data="faq_price")
     kb.button(text="🎓 Пробный урок", callback_data="faq_trial")
     kb.button(text="🔄 Перенос и отмена", callback_data="faq_cancel")
-    kb.button(text="✍️ Задать свой вопрос", callback_data="ask_custom")
-    kb.button(text="⬅️ Главное меню", callback_data="main_back")
-    kb.adjust(2, 2, 1, 1)
+    kb.button(text="⬅️ К ассистенту", callback_data="ask_ai")
+    kb.adjust(2, 2, 1)
+    return kb.as_markup()
+
+
+def english_level_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🌱 A1", callback_data="mini_en_A1")
+    kb.button(text="🌿 A2", callback_data="mini_en_A2")
+    kb.button(text="🌳 B1", callback_data="mini_en_B1")
+    kb.button(text="⬅️ К ассистенту", callback_data="ask_ai")
+    kb.adjust(3, 1)
+    return kb.as_markup()
+
+
+def ru_quiz_kb(question_index: int) -> InlineKeyboardMarkup:
+    q = RU_QUIZ[question_index]
+    kb = InlineKeyboardBuilder()
+    letters = ["А", "Б", "В"]
+    for idx, option in enumerate(q["options"]):
+        kb.button(
+            text=f"{letters[idx]}. {option}",
+            callback_data=f"ruans_{question_index}_{idx}",
+        )
+    kb.button(text="🎲 Другой вопрос", callback_data="ru_quiz")
+    kb.button(text="⬅️ К ассистенту", callback_data="ask_ai")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def irregular_quiz_kb(question_index: int) -> InlineKeyboardMarkup:
+    q = IRREGULAR_VERB_QUIZ[question_index]
+    kb = InlineKeyboardBuilder()
+    letters = ["A", "B", "C"]
+    for idx, option in enumerate(q["options"]):
+        kb.button(
+            text=f"{letters[idx]}. {option}",
+            callback_data=f"irans_{question_index}_{idx}",
+        )
+    kb.button(text="🎲 Другой глагол", callback_data="irregular_quiz")
+    kb.button(text="⬅️ К ассистенту", callback_data="ask_ai")
+    kb.adjust(1)
     return kb.as_markup()
 
 
@@ -859,10 +991,199 @@ async def ask_ai_start(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer(
         "🤖 Ассистент Дины\n\n"
-        "Можно выбрать частый вопрос кнопкой или написать свой 👇",
+        "Здесь можно не только задать вопрос, но и немного потренироваться 👇",
         reply_markup=assistant_quick_kb(),
     )
     await callback.answer()
+
+
+
+@dp.callback_query(F.data == "assistant_faq")
+async def assistant_faq(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer(
+        "❓ Частые вопросы о занятиях 👇",
+        reply_markup=assistant_faq_kb(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "mini_english")
+async def mini_english(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer(
+        "🇬🇧 Mini English\n\n"
+        "Выбери уровень — ассистент создаст новый короткий текст и 3 вопроса к нему. "
+        "Потом можешь прислать ответы прямо сюда, и он их проверит 👇",
+        reply_markup=english_level_kb(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("mini_en_"))
+async def mini_english_generate(callback: CallbackQuery, state: FSMContext):
+    level = callback.data.split("_")[-1]
+    await callback.answer("Создаю мини-текст ✨")
+    await callback.message.chat.do("typing")
+
+    prompt = (
+        f"Создай мини-задание по английскому уровня {level}. "
+        "Нужен интересный мини-текст на 70–110 слов на бытовую или подростковую тему. "
+        "После текста дай ровно 3 вопроса на понимание. "
+        "Не давай ответы сразу. Не используй Markdown, звёздочки или решётки. "
+        "В конце напиши одной строкой: «Пришли ответы 1–3, и я проверю 👀»."
+    )
+    answer = await ask_kie(prompt, callback.from_user.id)
+    await callback.message.answer(
+        "🇬🇧 Mini English\n\n" + answer,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Ещё текст", callback_data="mini_english")],
+                [InlineKeyboardButton(text="⬅️ К ассистенту", callback_data="ask_ai")],
+            ]
+        ),
+    )
+    # Следующее текстовое сообщение пользователя попадёт в ИИ;
+    # история уже содержит сам текст и вопросы, поэтому ИИ сможет проверить ответы.
+    await state.set_state(AskAI.waiting_question)
+
+
+@dp.callback_query(F.data == "ru_quiz")
+async def ru_quiz(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    idx = random.randrange(len(RU_QUIZ))
+    q = RU_QUIZ[idx]
+    await callback.message.answer(
+        "🇷🇺 Русский квиз · 1–4 класс\n\n"
+        f"{q['q']}",
+        reply_markup=ru_quiz_kb(idx),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("ruans_"))
+async def ru_quiz_answer(callback: CallbackQuery):
+    try:
+        _, qidx_raw, answer_raw = callback.data.split("_")
+        qidx = int(qidx_raw)
+        chosen = int(answer_raw)
+        q = RU_QUIZ[qidx]
+    except (ValueError, IndexError, KeyError):
+        return await callback.answer("Не получилось проверить ответ.", show_alert=True)
+
+    if chosen == q["answer"]:
+        result = "✅ Верно!"
+    else:
+        correct = ["А", "Б", "В"][q["answer"]]
+        result = f"❌ Почти! Правильный ответ — {correct}."
+
+    await callback.message.answer(
+        f"{result}\n\n{q['explain']}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🎲 Следующий вопрос", callback_data="ru_quiz")],
+                [InlineKeyboardButton(text="⬅️ К ассистенту", callback_data="ask_ai")],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+
+
+
+@dp.callback_query(F.data == "irregular_quiz")
+async def irregular_quiz(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    idx = random.randrange(len(IRREGULAR_VERB_QUIZ))
+    q = IRREGULAR_VERB_QUIZ[idx]
+    await callback.message.answer(
+        "🔤 Квиз: неправильные глаголы\n\n"
+        f"Выбери правильный вариант:\n\n{q['q']}",
+        reply_markup=irregular_quiz_kb(idx),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("irans_"))
+async def irregular_quiz_answer(callback: CallbackQuery):
+    try:
+        _, qidx_raw, answer_raw = callback.data.split("_")
+        qidx = int(qidx_raw)
+        chosen = int(answer_raw)
+        q = IRREGULAR_VERB_QUIZ[qidx]
+    except (ValueError, IndexError, KeyError):
+        return await callback.answer("Не получилось проверить ответ.", show_alert=True)
+
+    if chosen == q["answer"]:
+        result = "✅ Верно!"
+    else:
+        correct = ["A", "B", "C"][q["answer"]]
+        result = f"❌ Почти! Правильный вариант — {correct}."
+
+    await callback.message.answer(
+        f"{result}\n\n{q['explain']}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🎲 Следующий глагол", callback_data="irregular_quiz")],
+                [InlineKeyboardButton(text="⬅️ К ассистенту", callback_data="ask_ai")],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "assistant_surprise")
+async def assistant_surprise(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    challenges = [
+        (
+            "английский",
+            "Придумай короткое игровое задание по английскому на 1–2 минуты для школьника. "
+            "Можно загадку, мини-диалог, выбор правильного варианта или словесный челлендж. "
+            "Не давай ответ сразу. В конце предложи пользователю написать свой ответ."
+        ),
+        (
+            "русский язык",
+            "Придумай одно необычное короткое задание по русскому языку для ученика 1–4 класса. "
+            "Оно должно занимать 1–2 минуты и иметь однозначный ответ. Не раскрывай ответ сразу. "
+            "В конце предложи пользователю прислать ответ."
+        ),
+        (
+            "математика",
+            "Придумай одну весёлую математическую задачку для ученика 1–4 класса на 1–2 минуты. "
+            "Без слишком больших чисел. Не раскрывай решение и ответ сразу. "
+            "В конце предложи пользователю прислать ответ."
+        ),
+    ]
+    subject, task = random.choice(challenges)
+    await callback.answer("Выбираю задание 🎲")
+    await callback.message.chat.do("typing")
+    answer = await ask_kie(
+        f"Сейчас ты создаёшь сюрприз-задание по теме: {subject}. {task} "
+        "Не используй Markdown, звёздочки и решётки.",
+        callback.from_user.id,
+    )
+    await callback.message.answer(
+        "🎲 Задание-сюрприз\n\n" + answer,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🎲 Другое задание", callback_data="assistant_surprise")],
+                [InlineKeyboardButton(text="⬅️ К ассистенту", callback_data="ask_ai")],
+            ]
+        ),
+    )
+    await state.set_state(AskAI.waiting_question)
+
+
+@dp.message(Command("play"))
+async def play_command(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "🎮 Мини-режимы ассистента\n\n"
+        "Выбирай: английский мини-текст, квиз по русскому, неправильные глаголы или сюрприз-задание 👇",
+        reply_markup=assistant_quick_kb(),
+    )
 
 
 @dp.callback_query(F.data == "ask_custom")
@@ -876,7 +1197,7 @@ async def ask_custom(callback: CallbackQuery, state: FSMContext):
 
 
 async def answer_static_faq(callback: CallbackQuery, text: str):
-    await callback.message.answer(text, reply_markup=assistant_quick_kb())
+    await callback.message.answer(text, reply_markup=assistant_faq_kb())
     await callback.answer()
 
 
@@ -946,10 +1267,6 @@ async def trainers_command(message: Message):
 
 @dp.message(AskAI.waiting_question)
 async def ask_ai_receive(message: Message, state: FSMContext):
-    if message.from_user.id in STUB_AI_IDS:
-        await message.answer(STUB_ANSWER)
-        return
-
     await message.chat.do("typing")
     answer = await ask_kie(message.text, message.from_user.id)
     await message.answer(answer)
@@ -1063,10 +1380,6 @@ async def admin_del_slot_do(callback: CallbackQuery):
 async def ai_fallback(message: Message):
     if message.text.startswith("/"):
         return
-    if message.from_user.id in STUB_AI_IDS:
-        await message.answer(STUB_ANSWER)
-        return
-
     await message.chat.do("typing")
     answer = await ask_kie(message.text, message.from_user.id)
     await message.answer(answer)
@@ -1078,6 +1391,7 @@ async def setup_commands():
     common = [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="ask", description="Спросить ассистента"),
+        BotCommand(command="play", description="Мини-игры и квизы"),
         BotCommand(command="trainers", description="Тренажёры и материалы"),
     ]
     await bot.set_my_commands(common, scope=BotCommandScopeDefault())
